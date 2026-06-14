@@ -12,13 +12,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def read_root():
     return {"message": "Backend is running! ✅"}
 
+
 @app.get("/api/health")
 def health():
     return {"status": "healthy"}
+
 
 if __name__ == "__main__":
     import uvicorn

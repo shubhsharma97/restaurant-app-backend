@@ -1,18 +1,27 @@
 from fastapi import APIRouter, HTTPException
 from typing import List, Optional
-from app.models import Restaurant, RestaurantCreate
+from app.models import RestaurantCreate
 from app import database
 
 router = APIRouter()
 
 
 @router.get("/", response_model=List[dict])
-def list_restaurants(cuisine: Optional[str] = None, city: Optional[str] = None):
+def list_restaurants(
+    cuisine: Optional[str] = None,
+    city: Optional[str] = None,
+):
     restaurants = database.get_all_restaurants()
     if cuisine:
-        restaurants = [r for r in restaurants if r["cuisine"].lower() == cuisine.lower()]
+        restaurants = [
+            r for r in restaurants
+            if r["cuisine"].lower() == cuisine.lower()
+        ]
     if city:
-        restaurants = [r for r in restaurants if r["location"]["city"].lower() == city.lower()]
+        restaurants = [
+            r for r in restaurants
+            if r["location"]["city"].lower() == city.lower()
+        ]
     return restaurants
 
 

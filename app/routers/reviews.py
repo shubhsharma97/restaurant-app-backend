@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-from typing import List
 from app.models import ReviewCreate
 from app import database
 
