@@ -1,0 +1,1011 @@
+Raises:
+        HTTPException: If email already registered
+    """
+    
+    # Step 1: Check if email already exists
+    existing_user = db.query(User).filter(
+        User.email == user_data.email
+    ).first()
+    
+    if existing_user:
+        # Email already taken
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Step 2: Hash password
+    password_hash = hash_password(user_data.password)
+    
+    # Step 3: Create new user object
+    new_user = User(
+        email=user_data.email,
+        full_name=user_data.full_name,
+        password_hash=password_hash,
+        phone=user_data.phone,
+    )
+    
+    # Step 4: Save to database
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Step 5: Generate JWT token
+    access_token = create_access_token(
+        data={"sub": new_user.user_id}
+    )
+    
+    # Step 6: Return response
+    return RegisterResponse(
+        user=UserResponse.from_orm(new_user),
+        token=access_token,
+        token_type="bearer"
+    )
+
+# ============ LOGIN ENDPOINT ============
+
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    summary="Login user",
+    responses={
+        200: {"description": "Successfully logged in"},
+        401: {"description": "Invalid credentials"},
+    }
+)
+def login(
+    credentials: UserLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Login user with email and password.
+    
+    Flow:
+    1. Find user by email
+    2. Verify password matches hash
+    3. Generate JWT token
+    4. Return user data + token
+    
+    Args:
+        credentials: Email + password from login form
+        db: Database session
+    
+    Returns:
+        User data + JWT token
+    
+    Raises:
+        HTTPException: If email not found or password wrong
+    """
+    
+    # Step 1: Find user by email
+    user = db.query(User).filter(
+        User.email == credentials.email
+    ).first()
+    
+    # Step 2: Check if user exists and password matches
+    if not user or not verify_password(
+        credentials.password,
+        user.password_hash
+    ):
+        # Don't tell which one is wrong (security!)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Step 3: Generate JWT token
+    access_token = create_access_token(
+        data={"sub": user.user_id}
+    )
+    
+    # Step 4: Return response
+    return LoginResponse(
+        user=UserResponse.from_orm(user),
+        token=access_token,
+        token_type="bearer"
+    )
+
+# ============ GET CURRENT USER ENDPOINT ============
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current logged-in user",
+)
+def get_current_user(
+    token: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Get logged-in user's data.
+    
+    Only works if:
+    1. Token is in Authorization header
+    2. Token is valid and not expired
+    3. User exists in database
+    
+    Args:
+        token: JWT from Authorization header
+        db: Database session
+    
+    Returns:
+        Current user's data
+    
+    Raises:
+        HTTPException: If token invalid or user not found
+    """
+    from app.core.security import decode_access_token
+    from fastapi import Header
+    
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Remove "Bearer " prefix if present
+    if token.startswith("Bearer "):
+        token = token[7:]
+    
+    # Decode and verify token
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Get user from database
+    user = db.query(User).filter(
+        User.user_id == payload["user_id"]
+    ).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return UserResponse.from_orm(user)=== app/core/database.py ===
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from app.models.user import Base
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get database URL from environment
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL not set in environment variables!")
+
+# Create database engine
+# echo=True = log all SQL queries (useful for debugging)
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,  # Set to True to see SQL queries
+    pool_pre_ping=True,  # Test connection before using (prevents stale connections)
+)
+
+# Create session factory
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
+def get_db():
+    """
+    Dependency function for FastAPI.
+    
+    Provides database session to endpoints.
+    Ensures session is closed after endpoint finishes.
+    
+    Usage in endpoint:
+        @app.post("/api/auth/register")
+        def register(data: dict, db: Session = Depends(get_db)):
+            # db is automatically provided!
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    """
+    Create all database tables.
+    
+    Run once to initialize database schema.
+    """
+    Base.metadata.create_all(bind=engine)=== app/core/security.py ===
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from typing import Optional
+import jwt
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure password hashing
+# bcrypt is the industry standard (slow = secure against attacks)
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto"
+)
+
+# ============ JWT CONFIGURATION (FROM ENVIRONMENT) ============
+
+# Get SECRET_KEY from environment variables
+SECRET_KEY = os.getenv("SECRET_KEY")
+
+# Validate that SECRET_KEY is set
+if not SECRET_KEY:
+    raise ValueError(
+        "❌ CRITICAL ERROR: SECRET_KEY not set in environment variables!\n"
+        "Please add SECRET_KEY to your .env file or Replit secrets.\n"
+        "Generate one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+    )
+
+# Prevent using the default placeholder
+if SECRET_KEY == "your-secret-key-change-this-in-production":
+    raise ValueError(
+        "❌ ERROR: You're using the default SECRET_KEY!\n"
+        "This is a SECURITY RISK! Change it immediately!\n"
+        "Generate a new one with: python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+    )
+
+# Other JWT settings
+ALGORITHM = os.getenv("ALGORITHM", "HS256")  # Default to HS256 if not set
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))  # 24 hours default
+
+# ============ PASSWORD HASHING FUNCTIONS ============
+
+def hash_password(password: str) -> str:
+    """
+    Hash a password using bcrypt.
+
+    Why bcrypt?
+    - Deliberately SLOW (takes 0.3 seconds to hash)
+    - Slows down brute force attacks
+    - Industry standard
+
+    Args:
+        password: Plain text password from user
+
+    Returns:
+        Hashed password (looks like gibberish)
+    """
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a password against its hash.
+
+    Why separate function?
+    - Hashing is one-way (can't reverse hash)
+    - We hash the input password and compare hashes
+
+    Args:
+        plain_password: Password user entered in login form
+        hashed_password: Password stored in database
+
+    Returns:
+        True if passwords match, False otherwise
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+# ============ JWT TOKEN FUNCTIONS ============
+
+def create_access_token(
+    data: dict,
+    expires_delta: Optional[timedelta] = None
+) -> str:
+    """
+    Create a JWT token.
+
+    What is JWT?
+    - JSON Web Token
+    - Contains encoded data (user_id, email, etc.)
+    - Can't be forged without secret key
+    - Expires after time limit
+
+    Args:
+        data: What to encode (usually user_id)
+        expires_delta: When should token expire?
+
+    Returns:
+        JWT token string
+
+    Example:
+        token = create_access_token({"sub": "user123"})
+        # Returns: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    """
+    to_encode = data.copy()
+
+    # Set expiration time
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    to_encode.update({"exp": expire})
+
+    # Encode the token using SECRET_KEY from environment
+    encoded_jwt = jwt.encode(
+        to_encode,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    return encoded_jwt
+
+
+def decode_access_token(token: str) -> Optional[dict]:
+    """
+    Decode and verify a JWT token.
+
+    Why decode?
+    - Verify token hasn't been tampered with
+    - Extract user info from token
+    - Check if token has expired
+
+    Args:
+        token: JWT token string from client
+
+    Returns:
+        Decoded data if valid, None if invalid/expired
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+        user_id: str = payload.get("sub")
+
+        if user_id is None:
+            return None
+
+        return {"user_id": user_id}
+
+    except jwt.ExpiredSignatureError:
+        # Token has expired
+        print("⚠️ Token has expired")
+        return None
+    except jwt.InvalidTokenError:
+        # Token is invalid/forged
+        print("⚠️ Token is invalid or was tampered with")
+        return None
+
+
+# ============ PROTECTED ROUTE DEPENDENCY ============
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthCredentials
+
+# This tells FastAPI to expect "Authorization: Bearer <token>" header
+security = HTTPBearer()
+
+
+async def get_current_user_id(credentials: HTTPAuthCredentials = Depends(security)) -> str:
+    """
+    Extract and verify JWT token from request.
+
+    This is a dependency that:
+    1. Extracts token from "Authorization: Bearer <token>" header
+    2. Verifies token is valid
+    3. Returns user_id
+
+    Usage in endpoint:
+        @app.get("/api/protected")
+        def protected_route(user_id: str = Depends(get_current_user_id)):
+            return {"message": f"Hello {user_id}"}
+
+    If token missing/invalid → FastAPI returns 401 error automatically
+
+    Args:
+        credentials: HTTP credentials from header
+
+    Returns:
+        user_id from token
+
+    Raises:
+        HTTPException: If token invalid/missing
+    """
+    token = credentials.credentials
+
+    # Decode and verify token
+    payload = decode_access_token(token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return payload["user_id"]
+=== app/database.py ===
+from datetime import datetime
+from typing import Dict, List, Optional
+
+_restaurants: Dict[int, dict] = {
+    1: {
+        "id": 1,
+        "name": "The Golden Fork",
+        "cuisine": "American",
+        "description": "Classic American comfort food with a modern twist.",
+        "price_range": "$$",
+        "phone": "555-100-0001",
+        "website": "https://goldenfork.example.com",
+        "location": {
+            "address": "123 Main St",
+            "city": "Springfield",
+            "state": "IL",
+            "zip_code": "62701",
+            "latitude": 39.7817,
+            "longitude": -89.6501,
+        },
+        "average_rating": 4.5,
+        "review_count": 2,
+        "created_at": datetime(2024, 1, 15),
+    },
+    2: {
+        "id": 2,
+        "name": "Sakura Sushi",
+        "cuisine": "Japanese",
+        "description": "Authentic Japanese sushi and ramen in a cozy setting.",
+        "price_range": "$$$",
+        "phone": "555-100-0002",
+        "website": "https://sakurasushi.example.com",
+        "location": {
+            "address": "456 Oak Ave",
+            "city": "Springfield",
+            "state": "IL",
+            "zip_code": "62702",
+            "latitude": 39.7850,
+            "longitude": -89.6480,
+        },
+        "average_rating": 4.8,
+        "review_count": 1,
+        "created_at": datetime(2024, 2, 10),
+    },
+    3: {
+        "id": 3,
+        "name": "La Piazza",
+        "cuisine": "Italian",
+        "description": "Family-style Italian dining with house-made pasta.",
+        "price_range": "$$",
+        "phone": "555-100-0003",
+        "website": None,
+        "location": {
+            "address": "789 Elm Blvd",
+            "city": "Springfield",
+            "state": "IL",
+            "zip_code": "62703",
+            "latitude": 39.7790,
+            "longitude": -89.6520,
+        },
+        "average_rating": 4.2,
+        "review_count": 1,
+        "created_at": datetime(2024, 3, 5),
+    },
+}
+
+_reviews: Dict[int, dict] = {
+    1: {
+        "id": 1,
+        "restaurant_id": 1,
+        "user_id": 1,
+        "rating": 5.0,
+        "title": "Amazing burgers!",
+        "body": "Best comfort food in town. The fries are incredible.",
+        "created_at": datetime(2024, 4, 1),
+    },
+    2: {
+        "id": 2,
+        "restaurant_id": 1,
+        "user_id": 2,
+        "rating": 4.0,
+        "title": "Great atmosphere",
+        "body": "Solid food, friendly staff.",
+        "created_at": datetime(2024, 4, 10),
+    },
+    3: {
+        "id": 3,
+        "restaurant_id": 2,
+        "user_id": 1,
+        "rating": 4.8,
+        "title": "Freshest sushi around",
+        "body": "The omakase is worth every penny.",
+        "created_at": datetime(2024, 4, 15),
+    },
+    4: {
+        "id": 4,
+        "restaurant_id": 3,
+        "user_id": 2,
+        "rating": 4.2,
+        "title": "Tasty pasta",
+        "body": "The carbonara is excellent.",
+        "created_at": datetime(2024, 4, 20),
+    },
+}
+
+_users: Dict[int, dict] = {
+    1: {
+        "id": 1,
+        "username": "foodie_alice",
+        "email": "alice@example.com",
+        "created_at": datetime(2024, 1, 1),
+    },
+    2: {
+        "id": 2,
+        "username": "restaurant_bob",
+        "email": "bob@example.com",
+        "created_at": datetime(2024, 1, 5),
+    },
+}
+
+_restaurant_id_counter = 4
+_review_id_counter = 5
+_user_id_counter = 3
+
+
+def get_all_restaurants() -> List[dict]:
+    return list(_restaurants.values())
+
+
+def get_restaurant(restaurant_id: int) -> Optional[dict]:
+    return _restaurants.get(restaurant_id)
+
+
+def create_restaurant(data: dict) -> dict:
+    global _restaurant_id_counter
+    restaurant = {
+        **data,
+        "id": _restaurant_id_counter,
+        "average_rating": 0.0,
+        "review_count": 0,
+        "created_at": datetime.utcnow(),
+    }
+    _restaurants[_restaurant_id_counter] = restaurant
+    _restaurant_id_counter += 1
+    return restaurant
+
+
+def delete_restaurant(restaurant_id: int) -> bool:
+    if restaurant_id in _restaurants:
+        del _restaurants[restaurant_id]
+        return True
+    return False
+
+
+def get_all_reviews() -> List[dict]:
+    return list(_reviews.values())
+
+
+def get_reviews_for_restaurant(restaurant_id: int) -> List[dict]:
+    return [r for r in _reviews.values() if r["restaurant_id"] == restaurant_id]
+
+
+def get_review(review_id: int) -> Optional[dict]:
+    return _reviews.get(review_id)
+
+
+def create_review(data: dict) -> dict:
+    global _review_id_counter
+    review = {
+        **data,
+        "id": _review_id_counter,
+        "created_at": datetime.utcnow(),
+    }
+    _reviews[_review_id_counter] = review
+    _review_id_counter += 1
+    restaurant_id = data["restaurant_id"]
+    if restaurant_id in _restaurants:
+        all_ratings = [
+            r["rating"]
+            for r in _reviews.values()
+            if r["restaurant_id"] == restaurant_id
+        ]
+        all_ratings.append(data["rating"])
+        _restaurants[restaurant_id]["average_rating"] = round(
+            sum(all_ratings) / len(all_ratings), 2
+        )
+        _restaurants[restaurant_id]["review_count"] = len(all_ratings)
+    return review
+
+
+def get_all_users() -> List[dict]:
+    return list(_users.values())
+
+
+def get_user(user_id: int) -> Optional[dict]:
+    return _users.get(user_id)
+
+
+def create_user(data: dict) -> dict:
+    global _user_id_counter
+    user = {
+        **data,
+        "id": _user_id_counter,
+        "created_at": datetime.utcnow(),
+    }
+    _users[_user_id_counter] = user
+    _user_id_counter += 1
+    return user
+=== app/main.py ===
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.database import init_db
+from app.api import auth
+
+# Initialize database (create tables)
+init_db()
+
+app = FastAPI(
+    title="Restaurant Discovery API",
+    description="API for restaurant discovery and recipe suggestions",
+    version="1.0.0"
+)
+
+# Allow frontend to call this backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all for now
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include authentication routes
+app.include_router(auth.router)
+
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to Restaurant Discovery API!"}
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "healthy"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+=== app/models.py ===
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class Location(BaseModel):
+    address: str
+    city: str
+    state: str
+    zip_code: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+
+class RestaurantBase(BaseModel):
+    name: str
+    cuisine: str
+    description: Optional[str] = None
+    price_range: str = Field(..., pattern="^\\$+$", description="$ to $$$$")
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    location: Location
+
+
+class RestaurantCreate(RestaurantBase):
+    pass
+
+
+class Restaurant(RestaurantBase):
+    id: int
+    average_rating: float = 0.0
+    review_count: int = 0
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ReviewBase(BaseModel):
+    restaurant_id: int
+    rating: float = Field(..., ge=1, le=5)
+    title: Optional[str] = None
+    body: Optional[str] = None
+
+
+class ReviewCreate(ReviewBase):
+    user_id: int
+
+
+class Review(ReviewBase):
+    id: int
+    user_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UserBase(BaseModel):
+    username: str
+    email: str
+
+
+class UserCreate(UserBase):
+    pass
+
+
+class User(UserBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+=== app/models/user.py ===
+from sqlalchemy import Column, String, DateTime, Integer, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+import uuid
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+    
+    # Primary key - unique identifier for each user
+    user_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    
+    # Email - must be unique (no two users with same email)
+    email = Column(String, unique=True, nullable=False, index=True)
+    
+    # Full name
+    full_name = Column(String, nullable=False)
+    
+    # Password - NEVER store plaintext! Always hashed
+    password_hash = Column(String, nullable=False)
+    
+    # Phone number (optional)
+    phone = Column(String, nullable=True)
+    
+    # When account was created
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # When account was last updated
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Is account active?
+    is_active = Column(Boolean, default=True)
+    
+    def __repr__(self):
+        return f"<User {self.email}>"=== app/routers/restaurants.py ===
+from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+from app.models import RestaurantCreate
+from app import database
+
+router = APIRouter()
+
+
+@router.get("/", response_model=List[dict])
+def list_restaurants(
+    cuisine: Optional[str] = None,
+    city: Optional[str] = None,
+):
+    restaurants = database.get_all_restaurants()
+    if cuisine:
+        restaurants = [
+            r for r in restaurants
+            if r["cuisine"].lower() == cuisine.lower()
+        ]
+    if city:
+        restaurants = [
+            r for r in restaurants
+            if r["location"]["city"].lower() == city.lower()
+        ]
+    return restaurants
+
+
+@router.get("/{restaurant_id}")
+def get_restaurant(restaurant_id: int):
+    restaurant = database.get_restaurant(restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    return restaurant
+
+
+@router.post("/", status_code=201)
+def create_restaurant(data: RestaurantCreate):
+    return database.create_restaurant(data.model_dump())
+
+
+@router.delete("/{restaurant_id}", status_code=204)
+def delete_restaurant(restaurant_id: int):
+    if not database.delete_restaurant(restaurant_id):
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+=== app/routers/reviews.py ===
+from fastapi import APIRouter, HTTPException
+from app.models import ReviewCreate
+from app import database
+
+router = APIRouter()
+
+
+@router.get("/")
+def list_reviews():
+    return database.get_all_reviews()
+
+
+@router.get("/restaurant/{restaurant_id}")
+def get_reviews_for_restaurant(restaurant_id: int):
+    restaurant = database.get_restaurant(restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    return database.get_reviews_for_restaurant(restaurant_id)
+
+
+@router.get("/{review_id}")
+def get_review(review_id: int):
+    review = database.get_review(review_id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return review
+
+
+@router.post("/", status_code=201)
+def create_review(data: ReviewCreate):
+    restaurant = database.get_restaurant(data.restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    user = database.get_user(data.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return database.create_review(data.model_dump())
+=== app/routers/users.py ===
+from fastapi import APIRouter, HTTPException
+from app.models import UserCreate
+from app import database
+
+router = APIRouter()
+
+
+@router.get("/")
+def list_users():
+    return database.get_all_users()
+
+
+@router.get("/{user_id}")
+def get_user(user_id: int):
+    user = database.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+@router.post("/", status_code=201)
+def create_user(data: UserCreate):
+    return database.create_user(data.model_dump())
+=== app/schemas/user.py ===
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
+from datetime import datetime
+
+# ============ REQUEST SCHEMAS ============
+# What the frontend SENDS to us
+
+class UserRegisterRequest(BaseModel):
+    """
+    What frontend sends when signing up.
+    
+    Pydantic validates:
+    - email is valid email format
+    - password is at least 8 characters
+    """
+    email: EmailStr  # Validates email format automatically
+    full_name: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=8, max_length=100)
+    phone: Optional[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "john@example.com",
+                "full_name": "John Doe",
+                "password": "securePassword123",
+                "phone": "+1-555-0123"
+            }
+        }
+
+class UserLoginRequest(BaseModel):
+    """
+    What frontend sends when logging in.
+    """
+    email: EmailStr
+    password: str = Field(..., min_length=1)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "john@example.com",
+                "password": "securePassword123"
+            }
+        }
+
+# ============ RESPONSE SCHEMAS ============
+# What we SEND back to frontend
+
+class UserResponse(BaseModel):
+    """
+    User data we send back (NEVER includes password!).
+    
+    Why separate schemas?
+    - Registration returns user data + token
+    - Login returns user data + token
+    - GET /me returns just user data
+    """
+    user_id: str
+    email: str
+    full_name: str
+    phone: Optional[str]
+    created_at: datetime
+    is_active: bool
+    
+    class Config:
+        from_attributes = True  # Convert SQLAlchemy model to dict
+
+class RegisterResponse(BaseModel):
+    """
+    Response when user successfully registers.
+    """
+    user: UserResponse
+    token: str
+    token_type: str = "bearer"  # HTTP authentication type
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user": {
+                    "user_id": "123-456-789",
+                    "email": "john@example.com",
+                    "full_name": "John Doe",
+                    "phone": "+1-555-0123",
+                    "created_at": "2026-06-28T10:00:00",
+                    "is_active": True
+                },
+                "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "token_type": "bearer"
+            }
+        }
+
+class LoginResponse(BaseModel):
+    """
+    Response when user successfully logs in.
+    """
+    user: UserResponse
+    token: str
+    token_type: str = "bearer"
+
+class TokenResponse(BaseModel):
+    """
+    Just the token (for refresh operations).
+    """
+    access_token: str
+@shubhsharma97 ➜ /workspaces/restaurant-app-backend (main) $ 
