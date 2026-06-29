@@ -165,13 +165,13 @@ def decode_access_token(token: str) -> Optional[dict]:
 # ============ PROTECTED ROUTE DEPENDENCY ============
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # This tells FastAPI to expect "Authorization: Bearer <token>" header
 security = HTTPBearer()
 
 
-async def get_current_user_id(credentials: HTTPAuthCredentials = Depends(security)) -> str:
+async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """
     Extract and verify JWT token from request.
 
