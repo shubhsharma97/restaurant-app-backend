@@ -1,0 +1,1 @@
+- [passlib bcrypt compatibility](passlib-bcrypt-compat.md) — passlib==1.7.4 breaks with bcrypt>=4.1; must pin bcrypt==4.0.1
